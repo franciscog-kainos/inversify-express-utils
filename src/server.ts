@@ -8,7 +8,7 @@ import {
     getControllerMetadata,
     getControllerMethodMetadata,
     getControllerParameterMetadata,
-    instanceOfIHttpActionResult
+    instanceOfIHttpActionResult,
 } from "./utils";
 import {
     TYPE,
@@ -19,6 +19,7 @@ import {
 } from "./constants";
 import { HttpResponseMessage } from "./httpResponseMessage";
 import { OutgoingHttpHeaders } from "http";
+import * as wrap from "express-async-handler";
 
 export class InversifyExpressServer {
 
@@ -28,7 +29,7 @@ export class InversifyExpressServer {
     private _configFn: interfaces.ConfigFunction;
     private _errorConfigFn: interfaces.ConfigFunction;
     private _routingConfig: interfaces.RoutingConfig;
-    private _AuthProvider: { new(): interfaces.AuthProvider };
+    private _AuthProvider: { new(): interfaces.AuthProvider; };
     private _forceControllers: boolean;
 
     /**
@@ -46,7 +47,7 @@ export class InversifyExpressServer {
         customRouter?: express.Router | null,
         routingConfig?: interfaces.RoutingConfig | null,
         customApp?: express.Application | null,
-        authProvider?: { new(): interfaces.AuthProvider } | null,
+        authProvider?: { new(): interfaces.AuthProvider; } | null,
         forceControllers = true
     ) {
         this._container = container;
@@ -176,7 +177,7 @@ export class InversifyExpressServer {
                         `${controllerMetadata.path}${metadata.path}`,
                         ...controllerMiddleware,
                         ...routeMiddleware,
-                        handler
+                        wrap(handler)
                     );
                 });
             }
@@ -188,25 +189,29 @@ export class InversifyExpressServer {
     private resolveMidleware(...middleware: interfaces.Middleware[]): express.RequestHandler[] {
         return middleware.map(middlewareItem => {
             if (!this._container.isBound(middlewareItem)) {
-                return middlewareItem as express.RequestHandler;
+                return wrap(middlewareItem as express.RequestHandler);
             }
 
             type MiddlewareInstance = express.RequestHandler | BaseMiddleware;
             const m = this._container.get<MiddlewareInstance>(middlewareItem);
             if (m instanceof BaseMiddleware) {
                 const _self = this;
-                return function (
+                return async function (
                     req: express.Request,
                     res: express.Response,
                     next: express.NextFunction
                 ) {
                     let mReq = _self._container.get<BaseMiddleware>(middlewareItem);
                     (mReq as any).httpContext = _self._getHttpContext(req);
-                    mReq.handler(req, res, next);
+                    try {
+                        await mReq.handler(req, res, next);
+                    } catch (err) {
+                        next(err);
+                    }
                 };
             }
 
-            return m;
+            return wrap(m);
         });
     }
 
@@ -228,9 +233,9 @@ export class InversifyExpressServer {
             this.copyHeadersTo(message.content.headers, res);
 
             res.status(message.statusCode)
-               // If the content is a number, ensure we change it to a string, else our content is treated
-               // as a statusCode rather than as the content of the Response
-               .send(await message.content.readAsStringAsync());
+                // If the content is a number, ensure we change it to a string, else our content is treated
+                // as a statusCode rather than as the content of the Response
+                .send(await message.content.readAsStringAsync());
         } else {
             res.sendStatus(message.statusCode);
         }
@@ -242,32 +247,30 @@ export class InversifyExpressServer {
         parameterMetadata: interfaces.ParameterMetadata[]
     ): express.RequestHandler {
         return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-            try {
-                let args = this.extractParameters(req, res, next, parameterMetadata);
 
-                const httpContext = this._getHttpContext(req);
-                httpContext.container.bind<interfaces.HttpContext>(TYPE.HttpContext)
-                    .toConstantValue(httpContext);
+            let args = this.extractParameters(req, res, next, parameterMetadata);
 
-                // invoke controller's action
-                const value = await httpContext.container.getNamed<any>(TYPE.Controller, controllerName)[key](...args);
+            const httpContext = this._getHttpContext(req);
+            httpContext.container.bind<interfaces.HttpContext>(TYPE.HttpContext)
+                .toConstantValue(httpContext);
 
-                if (value instanceof HttpResponseMessage) {
-                    await this.handleHttpResponseMessage(value, res);
-                } else if (instanceOfIHttpActionResult(value)) {
-                    const httpResponseMessage = await value.executeAsync();
-                    await this.handleHttpResponseMessage(httpResponseMessage, res);
-                } else if (value instanceof Function) {
-                    value();
-                } else if (!res.headersSent) {
-                    if (value === undefined) {
-                        res.status(204);
-                    }
-                    res.send(value);
+            // invoke controller's action
+            const value = await httpContext.container.getNamed<any>(TYPE.Controller, controllerName)[key](...args);
+
+            if (value instanceof HttpResponseMessage) {
+                await this.handleHttpResponseMessage(value, res);
+            } else if (instanceOfIHttpActionResult(value)) {
+                const httpResponseMessage = await value.executeAsync();
+                await this.handleHttpResponseMessage(httpResponseMessage, res);
+            } else if (value instanceof Function) {
+                value();
+            } else if (!res.headersSent) {
+                if (value === undefined) {
+                    res.status(204);
                 }
-            } catch (err) {
-                next(err);
+                res.send(value);
             }
+
         };
     }
 

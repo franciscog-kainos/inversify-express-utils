@@ -2,7 +2,6 @@ import { interfaces as inversifyInterfaces } from "inversify";
 import { METADATA_KEY, NO_CONTROLLERS_FOUND } from "./constants";
 import { interfaces } from "./interfaces";
 import { TYPE } from "./constants";
-
 export function getControllersFromContainer(
     container: inversifyInterfaces.Container,
     forceControllers: boolean
